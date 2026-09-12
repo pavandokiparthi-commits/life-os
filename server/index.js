@@ -24,8 +24,15 @@ function loadEnv() {
 loadEnv();
 
 const PORT = process.env.SERVER_PORT || process.env.PORT || 3001;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+
+class GroqError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
 
 function getLocalIpAddresses() {
   const interfaces = os.networkInterfaces();
@@ -146,53 +153,93 @@ ${tasksSummary}
 }`;
 }
 
-async function callGemini(userMessage, context) {
-  if (!GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is not set in environment or .env file.');
+async function callGroq(userMessage, context) {
+  if (!GROQ_API_KEY) {
+    throw new GroqError('PROVIDER_AUTH_ERROR', 'GROQ_API_KEY is not set in environment or .env file.');
   }
 
   const promptText = buildSystemPrompt(userMessage, context);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const url = 'https://api.groq.com/openai/v1/chat/completions';
 
-  const requestBody = JSON.stringify({
-    contents: [
+  const requestPayload = {
+    model: GROQ_MODEL,
+    messages: [
+      {
+        role: 'system',
+        content: 'You are Life OS\'s conversational intent parsing agent. Output ONLY a valid JSON object with key "actions" containing an array of AIAction objects.',
+      },
       {
         role: 'user',
-        parts: [{ text: promptText }],
+        content: promptText,
       },
     ],
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.1,
-    },
-  });
+    response_format: { type: 'json_object' },
+    temperature: 0.1,
+  };
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: requestBody,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API error (${response.status}): ${errorText}`);
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify(requestPayload),
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new GroqError('PROVIDER_TIMEOUT', 'Groq API request timed out.');
+    }
+    throw new GroqError('PROVIDER_UNAVAILABLE', `Network error connecting to Groq: ${err.message}`);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
-  const data = await response.json();
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!response.ok) {
+    const status = response.status;
+    let errorDetail = '';
+    try {
+      errorDetail = await response.text();
+    } catch (_) {}
+
+    if (status === 429) {
+      throw new GroqError('PROVIDER_RATE_LIMITED', 'Groq AI provider rate limit reached.');
+    } else if (status === 401 || status === 403) {
+      throw new GroqError('PROVIDER_AUTH_ERROR', 'Groq AI provider authentication failed. Please check your GROQ_API_KEY.');
+    } else if (status >= 500) {
+      throw new GroqError('PROVIDER_UNAVAILABLE', `Groq AI provider service unavailable (HTTP ${status}).`);
+    } else {
+      throw new GroqError('PROVIDER_UNAVAILABLE', `Groq API returned HTTP ${status}.`);
+    }
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch (err) {
+    throw new GroqError('PROVIDER_BAD_RESPONSE', `Failed to parse Groq response JSON: ${err.message}`);
+  }
+
+  const rawText = data?.choices?.[0]?.message?.content;
   if (!rawText) {
-    throw new Error('Empty response payload from Gemini API.');
+    throw new GroqError('PROVIDER_BAD_RESPONSE', 'Empty response content received from Groq.');
   }
 
   let parsed;
   try {
     parsed = JSON.parse(rawText);
   } catch (err) {
-    throw new Error(`Failed to parse Gemini JSON output: ${err.message}`);
+    throw new GroqError('PROVIDER_BAD_RESPONSE', `Failed to parse structured JSON from Groq: ${err.message}`);
   }
 
   if (!parsed || !Array.isArray(parsed.actions)) {
-    throw new Error('Invalid JSON structure returned by Gemini: missing "actions" array.');
+    throw new GroqError('PROVIDER_BAD_RESPONSE', 'Invalid JSON structure returned by Groq: missing "actions" array.');
   }
 
   return parsed.actions;
@@ -212,7 +259,12 @@ const server = http.createServer(async (req, res) => {
   // Development Health Check Endpoint
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, model: GEMINI_MODEL, hasApiKey: Boolean(GEMINI_API_KEY) }));
+    res.end(JSON.stringify({
+      ok: true,
+      provider: 'groq',
+      model: GROQ_MODEL,
+      hasApiKey: Boolean(GROQ_API_KEY),
+    }));
     return;
   }
 
@@ -234,16 +286,28 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const actions = await callGemini(userMessage, context);
+        const actions = await callGroq(userMessage, context);
+        console.log(`[AI] Groq succeeded for request: "${userMessage.substring(0, 40)}..."`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, actions, mode: 'real_ai' }));
+        res.end(JSON.stringify({
+          success: true,
+          actions,
+          provider: 'groq',
+          mode: 'real_ai',
+        }));
       } catch (error) {
-        const isGeminiErr = error.message && error.message.includes('Gemini API error');
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        const errorCode = error.code || 'PROVIDER_UNAVAILABLE';
+        const httpStatus = errorCode === 'PROVIDER_RATE_LIMITED' ? 429 : (errorCode === 'PROVIDER_AUTH_ERROR' ? 401 : 500);
+
+        console.warn(`[AI] Groq failed (${errorCode}): ${error.message}`);
+        res.writeHead(httpStatus, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           success: false,
-          errorType: isGeminiErr ? 'GEMINI_API_ERROR' : 'SERVER_ERROR',
-          error: error.message,
+          error: {
+            code: errorCode,
+            provider: 'groq',
+            message: error.message || 'Groq provider error',
+          },
         }));
       }
     });
@@ -255,19 +319,30 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ success: false, error: 'Endpoint not found.' }));
 });
 
-// Bind to 0.0.0.0 so server listens on LAN and localhost
-server.listen(PORT, '0.0.0.0', () => {
-  const localIps = getLocalIpAddresses();
-  console.log(`\n==================================================`);
-  console.log(`[Life OS AI Backend] Server running on port ${PORT}`);
-  console.log(`[Life OS AI Backend] Configured Model: ${GEMINI_MODEL}`);
-  console.log(`[Life OS AI Backend] API Key Set: ${GEMINI_API_KEY ? 'YES' : 'NO (Set GEMINI_API_KEY in .env)'}`);
-  console.log(`[Life OS AI Backend] Health check: http://localhost:${PORT}/health`);
-  console.log(`--------------------------------------------------`);
-  console.log(`Reachable IP Addresses for Physical Device Testing:`);
-  console.log(`- Localhost / Emulator: http://10.0.2.2:${PORT}`);
-  localIps.forEach((ip) => {
-    console.log(`- LAN (Physical Device): http://${ip}:${PORT}`);
+// Export helper logic for testing
+module.exports = {
+  buildSystemPrompt,
+  callGroq,
+  GroqError,
+  server,
+};
+
+// Start listening if executed directly
+if (require.main === module) {
+  server.listen(PORT, '0.0.0.0', () => {
+    const localIps = getLocalIpAddresses();
+    console.log(`\n==================================================`);
+    console.log(`[Life OS AI Backend] Server running on port ${PORT}`);
+    console.log(`[Life OS AI Backend] Active Provider: Groq`);
+    console.log(`[Life OS AI Backend] Configured Model: ${GROQ_MODEL}`);
+    console.log(`[Life OS AI Backend] API Key Set: ${GROQ_API_KEY ? 'YES' : 'NO (Set GROQ_API_KEY in .env)'}`);
+    console.log(`[Life OS AI Backend] Health check: http://localhost:${PORT}/health`);
+    console.log(`--------------------------------------------------`);
+    console.log(`Reachable IP Addresses for Physical Device Testing:`);
+    console.log(`- Localhost / Emulator: http://10.0.2.2:${PORT}`);
+    localIps.forEach((ip) => {
+      console.log(`- LAN (Physical Device): http://${ip}:${PORT}`);
+    });
+    console.log(`==================================================\n`);
   });
-  console.log(`==================================================\n`);
-});
+}
