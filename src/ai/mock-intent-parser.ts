@@ -12,14 +12,67 @@ function normalizeText(text: string): string {
 }
 
 function parseDurationMinutes(text: string): number | null {
-  const hoursMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:hours|hour|hrs|hr|h\b)/i);
-  if (hoursMatch) {
-    return Math.round(parseFloat(hoursMatch[1]) * 60);
+  const lower = text.toLowerCase();
+
+  // 1. Special phrases: "half an hour" / "half hour"
+  if (/\bhalf\s+(?:an?\s+)?hour\b/i.test(lower)) {
+    return 30;
   }
 
-  const minutesMatch = text.match(/(\d+)\s*(?:minutes|minute|mins|min|m\b)/i);
-  if (minutesMatch) {
-    return parseInt(minutesMatch[1], 10);
+  // 2. Special phrases: "one and a half hours" / "1.5 hours"
+  if (
+    /\b(?:one|1)\s+and\s+(?:a\s+)?half\s+hours?\b/i.test(lower) ||
+    /\b1\.5\s*(?:hours|hour|hrs|hr|h\b)/i.test(lower)
+  ) {
+    return 90;
+  }
+
+  const wordToNum: Record<string, number> = {
+    a: 1,
+    an: 1,
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+  };
+
+  // Match hour expressions: "for about an hour", "around 90 minutes", "two hours", "for 2 hours"
+  const hoursMatch = lower.match(
+    /\b(?:for|about|around|approx|approximately)?\s*(\d+(?:\.\d+)?|an?|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:hours|hour|hrs|hr|h\b)/i
+  );
+  if (hoursMatch) {
+    const valStr = hoursMatch[1].toLowerCase();
+    const num = wordToNum[valStr] !== undefined ? wordToNum[valStr] : parseFloat(valStr);
+    if (!isNaN(num) && num > 0) {
+      return Math.round(num * 60);
+    }
+  }
+
+  const wordToMins: Record<string, number> = {
+    ten: 10,
+    fifteen: 15,
+    twenty: 20,
+    thirty: 30,
+    fortyfive: 45,
+    sixty: 60,
+    ninety: 90,
+  };
+
+  const minsMatch = lower.match(
+    /\b(?:for|about|around|approx|approximately)?\s*(\d+|ten|fifteen|twenty|thirty|fortyfive|sixty|ninety)\s*(?:minutes|minute|mins|min|m\b)/i
+  );
+  if (minsMatch) {
+    const valStr = minsMatch[1].toLowerCase();
+    const num = wordToMins[valStr] !== undefined ? wordToMins[valStr] : parseInt(valStr, 10);
+    if (!isNaN(num) && num > 0) {
+      return num;
+    }
   }
 
   return null;
@@ -63,7 +116,7 @@ function extractDateAndCleanText(text: string): ExtractedDateResult {
 
   if (parseResult.matchedPhrase) {
     const escaped = parseResult.matchedPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const phraseRegex = new RegExp(`(?:\\s+on|\\s+for)?\\s+${escaped}`, 'gi');
+    const phraseRegex = new RegExp(`(?:\\b(?:on|for)\\s+)?\\b${escaped}\\b`, 'gi');
     cleaned = cleaned.replace(phraseRegex, '');
   }
 
@@ -71,6 +124,43 @@ function extractDateAndCleanText(text: string): ExtractedDateResult {
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
   return { date: parseResult.date, cleanedText: cleaned };
+}
+
+function cleanTaskTitle(text: string): string {
+  let title = text;
+
+  // 1. Remove leading intent prefixes / verbs
+  const prefixRegex =
+    /^(?:add|create|task|i\s+need\s+to\s+study|i\s+need\s+to|need\s+to|remind\s+me\s+to|i\s+have\s+to\s+study|i\s+have\s+to|have\s+to|must|i\s+want\s+to\s+study|i\s+want\s+to|want\s+to|i\s+should\s+study|i\s+should|study|work\s+on|do|practice|read|write|prepare|review|fit|schedule)\s+/i;
+  title = title.replace(prefixRegex, '');
+
+  // Secondary check for leftover prefix words
+  title = title.replace(
+    /^(?:i\s+need\s+to|need\s+to|i\s+want\s+to|want\s+to|i\s+have\s+to|have\s+to|study|work\s+on|fit)\s+/i,
+    ''
+  );
+
+  // 2. Remove priority phrases
+  title = title.replace(/\b(?:high|medium|low)\s+priority\b/gi, '');
+  title = title.replace(/\bpriority\s+(?:high|medium|low)\b/gi, '');
+
+  // 3. Remove duration phrases
+  title = title.replace(
+    /\b(?:for|about|around|approx|approximately)?\s*(?:\d+(?:\.\d+)?|half|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s*(?:and\s+a\s+half\s+)?(?:hours|hour|hrs|hr|h|minutes|minute|mins|min|m)\b/gi,
+    ''
+  );
+  title = title.replace(/\b(?:for|about|around|approx|approximately)?\s*an?\s+hour\b/gi, '');
+
+  // 4. Remove filler phrases & trailing prepositions
+  title = title.replace(/,?\s*(?:can|could)\s+you\s+fit\s+(?:it|this)?\s*(?:in|into\s+my\s+day)?\??$/i, '');
+  title = title.replace(/\b(?:fit|fit\s+it)\s+(?:in|into)\s+my\s+day\b/gi, '');
+  title = title.replace(/\binto\s+my\s+day\b/gi, '');
+  title = title.replace(/\bmy\s+day\b/gi, '');
+  title = title.replace(/\b(?:for|on|at|in|to)\b\s*$/gi, '');
+
+  title = title.replace(/\s+/g, ' ').trim();
+
+  return title ? title.charAt(0).toUpperCase() + title.slice(1) : title;
 }
 
 export function parseIntent(userMessage: string): ParseIntentResult {
@@ -84,8 +174,9 @@ export function parseIntent(userMessage: string): ParseIntentResult {
   // Check for non-action / conversational / question intents
   const conversationQuestions = [
     /^(?:hey|hello|hi|greetings|good\s+morning|good\s+evening)\b/i,
-    /^(?:how\s+should\s+i|how\s+can\s+i|what\s+should\s+i|do\s+you\s+think|should\s+i|can\s+you\s+advise)\b/i,
+    /^(?:do\s+you\s+think|should\s+i|how\s+should\s+i|how\s+can\s+i|what\s+should\s+i|can\s+you\s+advise)\b/i,
     /^(?:i\s+studied|i\s+finished|i\s+was\s+studying|i\s+did|i\s+went|i\s+was|i\s+am\s+tired|i\s+feel)\b/i,
+    /^yesterday\s+i\s+(?:spent|studied|finished|was|did)\b/i,
   ];
 
   for (const pattern of conversationQuestions) {
@@ -96,7 +187,7 @@ export function parseIntent(userMessage: string): ParseIntentResult {
           error: 'Hello Mukhesh! How can I help you plan your day?',
         };
       }
-      if (/^(?:i\s+studied|i\s+finished|i\s+was\s+studying|i\s+did|i\s+went)/i.test(normalized)) {
+      if (/^(?:i\s+studied|i\s+finished|i\s+was\s+studying|i\s+did|i\s+went|yesterday)/i.test(normalized)) {
         return {
           success: false,
           error: 'Great job completing your study session!',
@@ -192,7 +283,12 @@ export function parseIntent(userMessage: string): ParseIntentResult {
 
   // C. Duration update
   const durationMatch =
-    normalized.match(/^(?:change|set|update)\s+(.+?)\s+(?:duration\s+)?to\s+(\d+(?:\.\d+)?\s*(?:hours|hour|hrs|hr|h|minutes|minute|mins|min|m))$/i);
+    normalized.match(
+      /^(?:change|set|update|make)\s+(.+?)\s+(?:duration\s+)?to\s+(\d+(?:\.\d+)?\s*(?:hours|hour|hrs|hr|h|minutes|minute|mins|min|m)|two\s+hours|one\s+hour|an?\s+hour|half\s+an?\s+hour|\d+\s+hours?)$/i
+    ) ||
+    normalized.match(
+      /^(?:make)\s+(.+?)\s+(two\s+hours|one\s+hour|an?\s+hour|half\s+an?\s+hour|\d+\s+hours?|\d+\s+minutes?)$/i
+    );
 
   if (durationMatch) {
     const taskTitleQuery = durationMatch[1].trim();
@@ -255,7 +351,7 @@ export function parseIntent(userMessage: string): ParseIntentResult {
     }
   }
 
-  // 5. Skip task patterns
+  // 6. Skip task patterns
   const skipRegexes = [
     /^(?:i\s+)?(?:skip|skipped)\s+(.+)$/,
     /^(?:i\s+)?(?:cant\s+do|cannot\s+do|dont\s+do)\s+(.+)$/,
@@ -276,10 +372,8 @@ export function parseIntent(userMessage: string): ParseIntentResult {
     }
   }
 
-  // 6. Delete task patterns
-  const deleteRegexes = [
-    /^(?:i\s+)?(?:delete|deleted|remove|removed)\s+(.+)$/,
-  ];
+  // 7. Delete task patterns
+  const deleteRegexes = [/^(?:i\s+)?(?:delete|deleted|remove|removed)\s+(.+)$/];
 
   for (const regex of deleteRegexes) {
     const match = normalized.match(regex);
@@ -296,23 +390,34 @@ export function parseIntent(userMessage: string): ParseIntentResult {
     }
   }
 
-  // 7. Create task patterns
+  // 8. Create task patterns (with sentence tolerance & filler stripping)
+  let cleanMsg = normalized
+    .replace(/,?\s*(?:can|could)\s+you\s+fit\s+(?:it|this)\s+(?:in|into\s+my\s+day)?\??$/i, '')
+    .replace(/^\s*(?:can|could)\s+you\s+(?:please\s+)?(?:add|schedule|fit)?\s*/i, 'add ')
+    .replace(/^\s*please\s+add\s+/i, 'add ')
+    .replace(
+      /^\s*put\s+(.+?)\s+on\s+(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)'s\s+plan$/i,
+      'add $1'
+    )
+    .trim();
+
   const createPrefixes = [
     /^(?:add|create)\s+(?:task\s+)?(.+)$/i,
-    /^(?:i\s+need\s+to|need\s+to|remind\s+me\s+to|i\s+have\s+to|have\s+to|must|i\s+want\s+to|want\s+to)\s+(.+)$/i,
-    /^(?:study|work\s+on|do|practice|read|write|prepare|review)\s+(.+)$/i,
+    /^(?:i\s+need\s+to|need\s+to|remind\s+me\s+to|i\s+have\s+to|have\s+to|must|i\s+want\s+to|want\s+to|i\s+should)\s+(.+)$/i,
+    /^(?:study|work\s+on|do|practice|read|write|prepare|review|fit)\s+(.+)$/i,
+    /^(?:tomorrow|today|day\s+after\s+tomorrow)\s+(?:i\s+(?:need|want|have|should)\s+to\s+)?(.+)$/i,
   ];
 
   let createMatch: RegExpMatchArray | null = null;
   for (const prefix of createPrefixes) {
-    createMatch = normalized.match(prefix);
+    createMatch = cleanMsg.match(prefix);
     if (createMatch) break;
   }
 
   if (createMatch) {
-    const priority = parsePriority(normalized);
-    const durationMinutes = parseDurationMinutes(normalized);
-    const dateResult = extractDateAndCleanText(normalized);
+    const priority = parsePriority(cleanMsg);
+    const durationMinutes = parseDurationMinutes(cleanMsg);
+    const dateResult = extractDateAndCleanText(cleanMsg);
 
     if (dateResult.unresolvedTemporalPhrase) {
       return {
@@ -321,18 +426,7 @@ export function parseIntent(userMessage: string): ParseIntentResult {
       };
     }
 
-    let titleStr = dateResult.cleanedText
-      .replace(/^(add|create)\s+(?:task\s+)?/i, '')
-      .replace(/^(i\s+need\s+to|need\s+to|remind\s+me\s+to|i\s+have\s+to|have\s+to|must|i\s+want\s+to|want\s+to)\s+/i, '')
-      .replace(/(high|medium|low)\s+priority\s*/i, '')
-      .replace(/priority\s+(high|medium|low)\s*/i, '');
-
-    if (durationMinutes !== null) {
-      titleStr = titleStr.replace(/\s+for\s+\d+(?:\.\d+)?\s*(?:hours|hour|hrs|hr|h|minutes|minute|mins|min|m)\b.*/i, '');
-    }
-
-    titleStr = titleStr.trim();
-    const title = titleStr ? titleStr.charAt(0).toUpperCase() + titleStr.slice(1) : titleStr;
+    const title = cleanTaskTitle(dateResult.cleanedText);
 
     const payload: {
       title: string;

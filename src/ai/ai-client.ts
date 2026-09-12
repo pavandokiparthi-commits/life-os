@@ -80,17 +80,26 @@ export async function parseIntentWithAI(
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      const isGeminiErr = errorData.errorType === 'GEMINI_API_ERROR';
-      const category = isGeminiErr ? '[GEMINI_API_ERROR]' : '[HTTP_ERROR]';
+      const isQuotaErr =
+        response.status === 429 ||
+        errorData.errorType === 'GEMINI_API_ERROR' ||
+        (typeof errorData.error === 'string' &&
+          (errorData.error.includes('429') ||
+            errorData.error.includes('RESOURCE_EXHAUSTED') ||
+            errorData.error.includes('quota')));
       const serverErr = errorData.error || `HTTP ${response.status}`;
 
-      console.warn(`${category} Server error at ${endpoint}: ${serverErr}`);
+      console.warn(`[AI_BACKEND_ERROR] Server status ${response.status}: ${serverErr}`);
 
       const mockResult = mockParseIntent(trimmed);
+      const noticeReason = isQuotaErr
+        ? '⚡ AI quota limit reached (HTTP 429) — using local command mode.'
+        : `⚡ AI backend error (${serverErr}) — using local command mode.`;
+
       return {
         ...mockResult,
         mode: 'mock_fallback',
-        notice: `⚡ AI backend error (${serverErr}) — using basic command mode.`,
+        notice: noticeReason,
       };
     }
 
